@@ -11,14 +11,18 @@ TWEAK_NAME = AirPodsAutoNoise
 AirPodsAutoNoise_FILES = Tweak.xm
 AirPodsAutoNoise_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
-# MediaRemote / BluetoothManager 都通过运行时反射（NSClassFromString / performSelector）调用，
-# 因此不需要链接期强绑定。改为 undefined = dynamic_lookup，避免 CI 环境因缺私有 .tbd 直接 exit 2。
+# MediaRemote / BluetoothManager 通过 NSClassFromString 运行时反射调用，CI 上
+# 不需要存在对应 .tbd，直接用 -undefined dynamic_lookup 在运行时解析。
 AirPodsAutoNoise_LDFLAGS = -Wl,-undefined,dynamic_lookup
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 SUBPROJECTS += Preferences
 include $(THEOS_MAKE_PATH)/aggregate.mk
+
+package::
+	@echo "[make-post-package] packages dir listing:"
+	@ls -la packages || echo "[make-post-package] packages dir MISSING"
 
 after-install::
 	install.exec "killall -9 mediaremoted || true"

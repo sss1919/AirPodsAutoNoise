@@ -7,8 +7,11 @@ BUNDLE_NAME = AirPodsAutoNoisePrefs
 
 AirPodsAutoNoisePrefs_FILES = APANRootListController.m
 AirPodsAutoNoisePrefs_INSTALL_PATH = /Library/PreferenceBundles
-AirPodsAutoNoisePrefs_FRAMEWORKS = UIKit Preferences
-AirPodsAutoNoisePrefs_PRIVATE_FRAMEWORKS = Preferences
+AirPodsAutoNoisePrefs_FRAMEWORKS = UIKit
+# Preferences 框架在少数 CI SDK / Roothide 环境里没有公开头文件或 .tbd，
+# 这里不再写 PRIVATE_FRAMEWORKS = Preferences，改用 -undefined dynamic_lookup，
+# 让符号推迟到运行时在 SpringBoard/Preferences 进程中解析。
+AirPodsAutoNoisePrefs_LDFLAGS = -Wl,-undefined,dynamic_lookup
 AirPodsAutoNoisePrefs_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/bundle.mk
