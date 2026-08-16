@@ -48,18 +48,43 @@ jobs:
 
       - name: Install Homebrew dependencies
         shell: bash -euxo pipefail {0}
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+          HOMEBREW_NO_AUTO_UPDATE: '1'
         run: |
           {
             echo '### brew install'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # 先处理 tap trust，避免 brew install 因为 aws/tap 报错
           set +e
-          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -80 | tee -a "$GITHUB_STEP_SUMMARY"
+          brew tap 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          brew untap aws/tap 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           set -e
+
+          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -100 | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          {
+            echo ''
+            echo '--- post-install versions ---'
+            ldid 2>&1 | head -1 || true
+            make --version | head -1 || true
+            dpkg-deb --version | head -1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 关键：把后续 step 要用的 PATH / THEOS / SDKVERSION 全部注入
           echo "/opt/homebrew/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
           echo "/opt/homebrew/opt/dpkg/bin" >> "$GITHUB_PATH"
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "SDKVERSION=17.1" >> "$GITHUB_ENV"
+          echo "TARGET=iphone:clang:17.1:15.0" >> "$GITHUB_ENV"
+          echo "ARCHS=arm64e" >> "$GITHUB_ENV"
+          echo "THEOS_PACKAGE_SCHEME=roothide" >> "$GITHUB_ENV"
 
       - name: Cache Theos + SDKs
         id: cache-theos
@@ -67,8 +92,9 @@ jobs:
         with:
           path: |
             /Users/runner/theos
-          key: ${{ runner.os }}-roothide-theos-v4-${{ hashFiles('.github/workflows/build.yml') }}
+          key: ${{ runner.os }}-roothide-theos-v5-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
+            ${{ runner.os }}-roothide-theos-v5-
             ${{ runner.os }}-roothide-theos-v4-
             ${{ runner.os }}-roothide-theos-v3-
             ${{ runner.os }}-roothide-theos-v2-
@@ -78,8 +104,6 @@ jobs:
         if: steps.cache-theos.outputs.cache-hit != 'true'
         shell: bash -euxo pipefail {0}
         run: |
-          set -e
-          export THEOS="$HOME/theos"
           echo "Installing RootHide-aware Theos to $THEOS ..."
 
           if [ -d "$THEOS" ]; then
@@ -96,14 +120,16 @@ jobs:
             # 2) 叠加 Roothide 的 vendor/bin/makefiles/include
             TMP_ROOTHIDE="$HOME/.tmp-roothide"
             rm -rf "$TMP_ROOTHIDE"
+            set +e
             git clone --recursive https://github.com/Roothide/Theos.git "$TMP_ROOTHIDE" 2>&1 | tail -20 | tee -a "$GITHUB_STEP_SUMMARY"
+            set -e
             for d in vendor bin makefiles include; do
                 [ -d "$TMP_ROOTHIDE/$d" ] || continue
                 cp -Rf "$TMP_ROOTHIDE/$d/." "$THEOS/$d/" || true
             done
             rm -rf "$TMP_ROOTHIDE"
 
-            # 3) SDKs
+            # 3) SDKs：优先链接 Xcode 自带，否则 fallback 下载
             mkdir -p "$THEOS/sdks"
             set +e
             SYS_SDK="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)"
@@ -130,15 +156,24 @@ jobs:
       - name: Ensure THEOS env & tool versions
         shell: bash -euxo pipefail {0}
         run: |
-          export THEOS="$HOME/theos"
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
           {
-            echo '### Environment'
+            echo '### Environment & THEOS layout'
             echo '```'
             echo THEOS="$THEOS"
+            echo SDKVERSION="$SDKVERSION"
+            echo TARGET="$TARGET"
+            echo ARCHS="$ARCHS"
+            echo THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME"
+            echo PATH="$PATH"
             test -d "$THEOS" && echo OK: THEOS exists
+            ls "$THEOS" | tee /tmp/theos_top.txt || true
+            echo '--- THEOS makefiles common.mk exist? ---'
+            [ -f "$THEOS/makefiles/common.mk" ] && echo OK: common.mk || echo MISSING: common.mk
+            [ -f "$THEOS/makefiles/tweak.mk" ] && echo OK: tweak.mk || echo MISSING: tweak.mk
+            echo '--- THEOS/bin ---'
             ls "$THEOS/bin" | head -30 || true
-            echo '---'
+            echo '--- tool versions ---'
             make --version | head -1
             dpkg-deb --version | head -1 || true
             clang --version | head -1
@@ -151,25 +186,30 @@ jobs:
         id: build
         shell: bash -euxo pipefail {0}
         run: |
-          export THEOS="$HOME/theos"
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
-          export THEOS_PACKAGE_SCHEME=roothide
-          export ARCHS=arm64e
-          export SDKVERSION=17.1
-          export TARGET=iphone:clang:17.1:15.0
-
           cd "$GITHUB_WORKSPACE"
           ls -la
 
           {
+            echo '### Build environment'
+            echo '```'
+            ( set -x
+              env | sort | grep -E '^(THEOS|SDK|TARGET|ARCHS|PACKAGE|PATH|SDKS|THEOS_' || true
+              make --version | head -1
+              test -f Makefile && echo "OK: Makefile present"
+              test -d "$THEOS" && echo "OK: THEOS=$THEOS"
+              bash -lc 'test -d "$THEOS" && echo OK: bash-login THEOS=$THEOS || echo MISSING THEOS in bash-login; echo THEOS=$THEOS; export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"; which make; which dpkg-deb'
+            ) 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```'
+            echo ''
             echo '### Build log'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          make clean 2>&1 | tail -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          make clean 2>&1 | tail -60 | tee -a "$GITHUB_STEP_SUMMARY" || true
           set +e
           set -o pipefail
-          make package FINALPACKAGE=1 VERBOSE=1 2>&1 | tee build.log | tail -n 300 | tee -a "$GITHUB_STEP_SUMMARY"
+          make package FINALPACKAGE=1 VERBOSE=1 2>&1 | tee build.log | tail -n 500 | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
@@ -180,14 +220,21 @@ jobs:
             echo '```'
             if [ "$rc" -ne 0 ]; then
                 echo ''
-                echo '### Full build.log (first 250 lines)'
+                echo '### THEOS + sdks top listing (on failure)'
                 echo '```'
-                head -n 250 build.log 2>/dev/null || true
+                ls -la "$THEOS" 2>&1 | head -50 || true
+                echo '---'
+                ls -la "$THEOS/sdks" 2>&1 | head -50 || true
                 echo '```'
                 echo ''
-                echo '### Full build.log (last 250 lines)'
+                echo '### Full build.log (first 300 lines)'
                 echo '```'
-                tail -n 250 build.log 2>/dev/null || true
+                head -n 300 build.log 2>/dev/null || true
+                echo '```'
+                echo ''
+                echo '### Full build.log (last 300 lines)'
+                echo '```'
+                tail -n 300 build.log 2>/dev/null || true
                 echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
