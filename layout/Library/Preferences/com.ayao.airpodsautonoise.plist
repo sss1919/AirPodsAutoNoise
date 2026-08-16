@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>apan_enabled</key>
+    <true/>
+    <key>apan_auto_anc_on_connect</key>
+    <true/>
+    <key>apan_auto_anc_on_play</key>
+    <true/>
+    <key>apan_auto_trans_on_stop</key>
+    <true/>
+    <key>apan_cooldown_seconds</key>
+    <integer>30</integer>
+    <key>apan_app_blacklist</key>
+    <array>
+        <string>com.ss.iphone.ugc.Aweme</string>
+        <string>com.ss.iphone.ugc.Aweme.lite</string>
+    </array>
+</dict>
+</plist>

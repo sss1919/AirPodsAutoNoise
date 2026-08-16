@@ -1,0 +1,15 @@
+# Xcode / Theos build artifacts
+*.deb
+.build/
+_build/
+obj/
+theos/
+
+# macOS / Xcode
+.DS_Store
+*.xcuserstate
+*.xcscmblueprint
+
+# Temporary
+*.tmp
+*.swp

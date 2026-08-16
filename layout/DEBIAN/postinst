@@ -1,0 +1,27 @@
+#!/bin/bash
+
+set -e
+
+# RootHide / Rootless 兼容：重启目标进程
+if [ -e "/var/jb/usr/bin/uicache" ]; then
+    /var/jb/usr/bin/uicache -p /Library/PreferenceBundles/AirPodsAutoNoisePrefs.bundle 2>/dev/null || true
+fi
+
+# 杀掉 mediaremoted 让注入生效
+killall -9 mediaremoted 2>/dev/null || true
+
+# 杀掉 Preferences 让设置面板刷新
+killall -9 Preferences 2>/dev/null || true
+
+# 写入默认偏好（rootless 用户域）
+PLIST_PATH="/var/mobile/Library/Preferences/com.ayao.airpodsautonoise.plist"
+if [ -e "/var/jb/Library/PreferenceBundles/AirPodsAutoNoisePrefs.bundle" ]; then
+    if [ ! -f "$PLIST_PATH" ]; then
+        /var/jb/usr/bin/plutil -create binary1 "$PLIST_PATH" 2>/dev/null || true
+    fi
+fi
+
+# 确保偏好归属正确
+chown mobile:mobile "$PLIST_PATH" 2>/dev/null || true
+
+exit 0

@@ -1,0 +1,9 @@
+#!/bin/bash
+
+set -e
+
+# 卸载时重启目标进程让注入失效
+killall -9 mediaremoted 2>/dev/null || true
+killall -9 Preferences 2>/dev/null || true
+
+exit 0

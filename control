@@ -1,0 +1,10 @@
+Package: com.ayao.airpodsautonoise
+Name: AirPodsAutoNoise
+Depends: mobilesubstrate, preferenceloader
+Version: 1.0.0
+Architecture: iphoneos-arm64e
+Description: AirPods Pro 系列自动降噪稳定版。仅注入 SpringBoard，识别支持降噪/通透的 AirPods 后自动切主动降噪；播放停止回通透仅在信号可靠时触发。
+Maintainer: ayao
+Author: ayao
+Section: Tweaks
+Depiction: https://ayao.dev/depictions/airpodsautonoise

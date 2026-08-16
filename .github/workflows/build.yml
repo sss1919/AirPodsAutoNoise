@@ -1,0 +1,137 @@
+name: Build Theos Package
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  THEOS: /opt/theos
+  THEOS_PACKAGE_SCHEME: roothide
+  SDKVERSION: '17.1'
+  TARGET: iphone:clang:17.1:15.0
+  ARCHS: arm64e
+
+jobs:
+  build:
+    name: Build Tweak (Rootless arm64e)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew install ldid xz gnu-tar pkg-config make
+          echo "/usr/local/opt/make/libexec/gnubin" >> $GITHUB_PATH 2>/dev/null || true
+          echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH 2>/dev/null || true
+
+      - name: Cache Xcode / SDKs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode
+            ~/Library/Developer/CoreSimulator
+          key: ${{ runner.os }}-xcode-${{ hashFiles('**/*.xcodeproj/**') }}
+          restore-keys: |
+            ${{ runner.os }}-xcode-
+
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/theos
+            ~/theos
+          key: ${{ runner.os }}-theos-roothide-2024-1
+
+      - name: Install Theos + RootHide toolchain
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          set -e
+
+          # 1) 官方 Theos (稳定版)
+          git clone --recursive https://github.com/theos/theos.git /opt/theos || true
+          cd /opt/theos
+          git pull --ff-only || true
+          git submodule update --init --recursive || true
+
+          # 2) 获取 iPhoneOS SDK (17.x)
+          mkdir -p /opt/theos/sdks
+          cd /opt/theos/sdks
+          SDK_REPO="https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.tar.gz"
+          curl -L "$SDK_REPO" -o sdks.tar.gz 2>&1 | tail -3
+          tar -xzf sdks.tar.gz --strip-components=1 -C /opt/theos/sdks || true
+          rm -f sdks.tar.gz
+          ls -la /opt/theos/sdks | head -20
+
+      - name: Ensure THEOS env
+        run: |
+          ls /opt/theos || true
+          test -d /opt/theos
+          ls /opt/theos/sdks 2>/dev/null || echo "sdks dir listing:" && find /opt/theos/sdks -maxdepth 1 -type d | head
+
+      - name: Build package (make package FINALPACKAGE=1)
+        id: build
+        run: |
+          export PATH="/opt/theos/bin:$PATH"
+          export THEOS=/opt/theos
+          export THEOS_PACKAGE_SCHEME=roothide
+          export ARCHS=arm64e
+          export SDKVERSION=17.1
+          export TARGET=iphone:clang:17.1:15.0
+
+          set -o pipefail
+          make clean || true
+          make package FINALPACKAGE=1 2>&1 | tee build.log
+
+          echo "--- Build output listing ---"
+          find . -maxdepth 2 \( -name "*.deb" -o -name "*.zip" \) -ls
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Upload .deb artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            ./*.deb
+            ./*/*.deb
+
+  release:
+    name: Create GitHub Release (tag only)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: ./packages
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./packages/*.deb
+          generate_release_notes: true
+          draft: false
+          prerelease: false
