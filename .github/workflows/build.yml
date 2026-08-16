@@ -23,6 +23,10 @@ jobs:
     permissions:
       contents: read
 
+    defaults:
+      run:
+        shell: bash -lc {0}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,7 +35,6 @@ jobs:
           fetch-depth: 0
 
       - name: Print runner info
-        shell: bash -euxo pipefail {0}
         run: |
           {
             echo '### Runner info'
@@ -47,44 +50,34 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Homebrew dependencies
-        shell: bash -euxo pipefail {0}
         env:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: '1'
           HOMEBREW_NO_INSTALL_CLEANUP: '1'
           HOMEBREW_NO_AUTO_UPDATE: '1'
         run: |
+          set +e
           {
-            echo '### brew install'
+            echo '### brew install (non-fatal on tap warnings)'
+            echo '```'
+            echo '--- brew tap ---'
+            brew tap
+            echo '--- untap aws/tap ---'
+            brew untap aws/tap 2>&1
+            echo '--- brew install ---'
+            brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -n 120
+            echo '--- versions ---'
+            command -v ldid dpkg-deb gmake make || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-          # 先处理 tap trust，避免 brew install 因为 aws/tap 报错
-          set +e
-          brew tap 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-          brew untap aws/tap 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           set -e
 
-          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -100 | tee -a "$GITHUB_STEP_SUMMARY" || true
-
           {
-            echo ''
-            echo '--- post-install versions ---'
-            ldid 2>&1 | head -1 || true
-            make --version | head -1 || true
-            dpkg-deb --version | head -1 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          # 关键：把后续 step 要用的 PATH / THEOS / SDKVERSION 全部注入
-          echo "/opt/homebrew/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
-          echo "/opt/homebrew/opt/dpkg/bin" >> "$GITHUB_PATH"
-          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
-
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "SDKVERSION=17.1" >> "$GITHUB_ENV"
-          echo "TARGET=iphone:clang:17.1:15.0" >> "$GITHUB_ENV"
-          echo "ARCHS=arm64e" >> "$GITHUB_ENV"
-          echo "THEOS_PACKAGE_SCHEME=roothide" >> "$GITHUB_ENV"
+            echo "THEOS=${THEOS}"
+            echo "THEOS_PACKAGE_SCHEME=${THEOS_PACKAGE_SCHEME}"
+            echo "SDKVERSION=${SDKVERSION}"
+            echo "TARGET=${TARGET}"
+            echo "ARCHS=${ARCHS}"
+          } >> "$GITHUB_ENV"
 
       - name: Cache Theos + SDKs
         id: cache-theos
@@ -92,194 +85,183 @@ jobs:
         with:
           path: |
             /Users/runner/theos
-          key: ${{ runner.os }}-roothide-theos-v5-${{ hashFiles('.github/workflows/build.yml') }}
+            /Users/runner/sdks
+          key: theos-roothide-arm64e-macos14-v1-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
-            ${{ runner.os }}-roothide-theos-v5-
-            ${{ runner.os }}-roothide-theos-v4-
-            ${{ runner.os }}-roothide-theos-v3-
-            ${{ runner.os }}-roothide-theos-v2-
-            ${{ runner.os }}-roothide-theos-
+            theos-roothide-arm64e-macos14-v1-
 
-      - name: Install RootHide Theos + SDKs
-        if: steps.cache-theos.outputs.cache-hit != 'true'
-        shell: bash -euxo pipefail {0}
+      - name: Setup Theos + RootHide overlay + iPhoneOS SDK
         run: |
-          echo "Installing RootHide-aware Theos to $THEOS ..."
+          {
+            echo '### Setup Theos / RootHide / SDK'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ -d "$THEOS" ]; then
-              echo "Removing stale $THEOS to avoid unrelated histories ..."
-              rm -rf "$THEOS"
+          if [ -d "$THEOS" ] && [ -f "$THEOS/makefiles/common.mk" ] && [ -f "$THEOS/makefiles/tweak.mk" ]; then
+            echo "[cache-hit] THEOS restored, skipping bootstrap" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            set -e
+            echo "[cache-miss] bootstrapping THEOS..." | tee -a "$GITHUB_STEP_SUMMARY"
+
+            git clone --recursive https://github.com/theos/theos.git "$THEOS" 2>&1 | tail -n 40 | tee -a "$GITHUB_STEP_SUMMARY"
+
+            for d in vendor bin makefiles include; do
+              rm -rf "$THEOS/$d" 2>/dev/null || true
+              git clone --depth 1 --single-branch https://github.com/Roothide/Theos.git "$THEOS/.roothide-src-$d" 2>&1 | tail -n 5 | tee -a "$GITHUB_STEP_SUMMARY" || true
+              if [ -d "$THEOS/.roothide-src-$d/$d" ]; then
+                cp -R "$THEOS/.roothide-src-$d/$d" "$THEOS/$d"
+              fi
+              rm -rf "$THEOS/.roothide-src-$d"
+            done
+
+            export PATH="$THEOS/bin:$PATH"
+            echo "PATH=$PATH" | tee -a "$GITHUB_ENV"
           fi
 
-          echo '### Theos install log' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          (set -x
-            # 1) 官方 Theos（稳定）
-            git clone --recursive https://github.com/theos/theos.git "$THEOS" 2>&1 | tail -50 | tee -a "$GITHUB_STEP_SUMMARY"
-
-            # 2) 叠加 Roothide 的 vendor/bin/makefiles/include
-            TMP_ROOTHIDE="$HOME/.tmp-roothide"
-            rm -rf "$TMP_ROOTHIDE"
-            set +e
-            git clone --recursive https://github.com/Roothide/Theos.git "$TMP_ROOTHIDE" 2>&1 | tail -20 | tee -a "$GITHUB_STEP_SUMMARY"
-            set -e
-            for d in vendor bin makefiles include; do
-                [ -d "$TMP_ROOTHIDE/$d" ] || continue
-                cp -Rf "$TMP_ROOTHIDE/$d/." "$THEOS/$d/" || true
-            done
-            rm -rf "$TMP_ROOTHIDE"
-
-            # 3) SDKs：优先链接 Xcode 自带，否则 fallback 下载
-            mkdir -p "$THEOS/sdks"
-            set +e
-            SYS_SDK="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)"
-            set -e
-            if [ -n "$SYS_SDK" ] && [ -d "$SYS_SDK" ]; then
-                SDK_NAME="$(basename "$SYS_SDK")"
-                [ -e "$THEOS/sdks/$SDK_NAME" ] || ln -s "$SYS_SDK" "$THEOS/sdks/$SDK_NAME"
-                echo "Using bundled SDK: $SDK_NAME -> $SYS_SDK" | tee -a "$GITHUB_STEP_SUMMARY"
-            fi
-
-            if [ ! "$(ls -A $THEOS/sdks 2>/dev/null)" ]; then
-                echo "Fallback: downloading iOS-SDKs ..." | tee -a "$GITHUB_STEP_SUMMARY"
-                cd /tmp
-                curl -fsSL -o sdks.tar.gz https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.tar.gz 2>&1 | tail -5 | tee -a "$GITHUB_STEP_SUMMARY"
-                tar -xzf sdks.tar.gz -C "$THEOS/sdks" --strip-components=1 2>&1 | tail -5 | tee -a "$GITHUB_STEP_SUMMARY" || true
-                rm -f sdks.tar.gz
-            fi
-
-            echo "Final SDKs dir:" | tee -a "$GITHUB_STEP_SUMMARY"
-            ls -la "$THEOS/sdks" | head -30 | tee -a "$GITHUB_STEP_SUMMARY"
-          )
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Ensure THEOS env & tool versions
-        shell: bash -euxo pipefail {0}
-        run: |
-          export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
+          set +e
           {
-            echo '### Environment & THEOS layout'
+            echo '--- THEOS layout (top) ---'
+            ls -la "$THEOS" 2>&1 | head -n 60
+            echo '--- THEOS makefiles ---'
+            ls -la "$THEOS/makefiles" 2>&1 | head -n 80
+            echo '--- THEOS bin ---'
+            ls -la "$THEOS/bin" 2>&1 | head -n 80
+            echo '--- THEOS vendor ---'
+            ls -la "$THEOS/vendor" 2>&1 | head -n 40
+            echo '--- common.mk / tweak.mk present? ---'
+            for f in "$THEOS/makefiles/common.mk" "$THEOS/makefiles/tweak.mk" "$THEOS/bin/dnicetype"; do
+              if [ -e "$f" ]; then echo "OK  $f"; else echo "MISS $f"; fi
+            done
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set -e
+
+          mkdir -p "$HOME/sdks" || true
+          SDK_FROM_XCRUN="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true)"
+          {
+            echo '### SDK info'
+            echo '```'
+            echo "SDK_FROM_XCRUN=$SDK_FROM_XCRUN"
+            ls -la "$HOME/sdks" 2>&1 | head -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$SDK_FROM_XCRUN" ]; then
+            set -e
+            if ! command -v xcodes >/dev/null 2>&1; then
+              brew install --formula xcodesorg/made/xcodes 2>&1 | tail -n 30 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            fi
+            if command -v xcodes >/dev/null 2>&1; then
+              xcodes install 15.2 --select 2>&1 | tail -n 40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            fi
+          fi
+
+      - name: Pre-build debug dump (always run)
+        run: |
+          set +e
+          {
+            echo '### Build Environment'
+            echo '```'
+            echo "THEOS=$THEOS"
+            echo "THEOS_PACKAGE_SCHEME=$THEOS_PACKAGE_SCHEME"
+            echo "SDKVERSION=$SDKVERSION"
+            echo "TARGET=$TARGET"
+            echo "ARCHS=$ARCHS"
+            echo "PATH=$PATH"
+            echo '--- which theos bins ---'
+            which theos theos-build logify 2>&1
+            echo '--- ls THEOS/makefiles/*.mk ---'
+            ls "$THEOS/makefiles"/*.mk 2>&1 | head -n 50
+            echo '--- ls THEOS/sdks ---'
+            ls -la "$THEOS/sdks" 2>&1 | head -n 30
+            echo '--- xcrun sdk iphoneos ---'
+            xcrun --sdk iphoneos --show-sdk-path 2>&1
+            xcrun --sdk iphoneos --show-sdk-version 2>&1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set -e
+
+      - name: Build package (make package THEOS_PACKAGE_SCHEME=roothide)
+        id: build
+        continue-on-error: true
+        run: |
+          {
+            echo '### Build Environment'
+            echo '```'
+            set | grep -E '^(THEOS|SDK|TARGET|ARCHS|PATH|HOME|GITHUB)' 2>&1 | head -n 40 || true
+            echo '--- env from workflow ---'
             echo THEOS="$THEOS"
+            echo THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME"
             echo SDKVERSION="$SDKVERSION"
             echo TARGET="$TARGET"
             echo ARCHS="$ARCHS"
-            echo THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME"
-            echo PATH="$PATH"
-            test -d "$THEOS" && echo OK: THEOS exists
-            ls "$THEOS" | tee /tmp/theos_top.txt || true
-            echo '--- THEOS makefiles common.mk exist? ---'
-            [ -f "$THEOS/makefiles/common.mk" ] && echo OK: common.mk || echo MISSING: common.mk
-            [ -f "$THEOS/makefiles/tweak.mk" ] && echo OK: tweak.mk || echo MISSING: tweak.mk
-            echo '--- THEOS/bin ---'
-            ls "$THEOS/bin" | head -30 || true
-            echo '--- tool versions ---'
-            make --version | head -1
-            dpkg-deb --version | head -1 || true
-            clang --version | head -1
-            xcrun --find clang || true
-            ldid 2>&1 | head -1 || true
+            echo '--- THEOS dir sanity ---'
+            for f in "$THEOS/makefiles/common.mk" "$THEOS/makefiles/tweak.mk"; do
+              if [ -f "$f" ]; then echo "OK  $f"; else echo "MISSING $f"; fi
+            done
+            ls -la "$THEOS/makefiles" 2>&1 | head -n 50 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build package
-        id: build
-        shell: bash -euxo pipefail {0}
-        run: |
-          export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
-          cd "$GITHUB_WORKSPACE"
-          ls -la
-
-          {
-            echo '### Build environment'
-            echo '```'
-            ( set -x
-              env | sort | grep -E '^(THEOS|SDK|TARGET|ARCHS|PACKAGE|PATH|SDKS|THEOS_' || true
-              make --version | head -1
-              test -f Makefile && echo "OK: Makefile present"
-              test -d "$THEOS" && echo "OK: THEOS=$THEOS"
-              bash -lc 'test -d "$THEOS" && echo OK: bash-login THEOS=$THEOS || echo MISSING THEOS in bash-login; echo THEOS=$THEOS; export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"; which make; which dpkg-deb'
-            ) 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-            echo '```'
-            echo ''
-            echo '### Build log'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          make clean 2>&1 | tail -60 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          BUILD_LOG="$RUNNER_TEMP/build.log"
           set +e
-          set -o pipefail
-          make package FINALPACKAGE=1 VERBOSE=1 2>&1 | tee build.log | tail -n 500 | tee -a "$GITHUB_STEP_SUMMARY"
-          rc=${PIPESTATUS[0]}
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME" SDKVERSION="$SDKVERSION" TARGET="$TARGET" ARCHS="$ARCHS" 2>&1 | tee "$BUILD_LOG" | tail -n 80 | tee -a "$GITHUB_STEP_SUMMARY"
+          RC="${PIPESTATUS[0]}"
+          set -e
 
           {
-            echo '### Build output'
+            echo "### Build result: exit=$RC"
+            if [ -f "$BUILD_LOG" ]; then
+              echo "build.log bytes: $(wc -c < "$BUILD_LOG" | tr -d ' ')"
+            fi
+            echo ''
+            echo '### Full build.log (last 300 lines)'
             echo '```'
-            find "$GITHUB_WORKSPACE" -maxdepth 3 \( -name "*.deb" -o -name "*.zip" -o -name "*.dylib" \) -ls 2>&1 || true
+            if [ -f "$BUILD_LOG" ]; then tail -n 300 "$BUILD_LOG"; fi
             echo '```'
-            if [ "$rc" -ne 0 ]; then
-                echo ''
-                echo '### THEOS + sdks top listing (on failure)'
-                echo '```'
-                ls -la "$THEOS" 2>&1 | head -50 || true
-                echo '---'
-                ls -la "$THEOS/sdks" 2>&1 | head -50 || true
-                echo '```'
-                echo ''
-                echo '### Full build.log (first 300 lines)'
-                echo '```'
-                head -n 300 build.log 2>/dev/null || true
-                echo '```'
-                echo ''
-                echo '### Full build.log (last 300 lines)'
-                echo '```'
-                tail -n 300 build.log 2>/dev/null || true
-                echo '```'
+
+            if [ "$RC" -ne 0 ]; then
+              echo ''
+              echo '### Environment & THEOS layout (on failure only)'
+              echo '```'
+              set | grep -i -E 'theos|sdk|target|arch|path|root' | head -n 60
+              echo '---'
+              ls -la "$THEOS" 2>&1 | head -n 50
+              ls -la "$THEOS/makefiles" 2>&1 | head -n 80
+              echo '---'
+              find "$THEOS" -maxdepth 3 -type d 2>&1 | head -n 80
+              echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          exit "$rc"
+          echo "build-log-path=$BUILD_LOG" >> "$GITHUB_OUTPUT"
 
-      - name: Upload build log on failure
-        if: failure()
+          exit "$RC"
+
+      - name: Upload build log
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: build-log
-          path: build.log
-          if-no-files-found: ignore
+          path: ${{ steps.build.outputs.build-log-path }}
+          retention-days: 14
+          if-no-files-found: warn
 
-      - name: Upload .deb artifact
-        if: always()
+      - name: Upload .deb packages
         uses: actions/upload-artifact@v4
         with:
           name: packages
-          if-no-files-found: ignore
-          path: |
-            ./*.deb
-            ./*/*.deb
-            ./*/*/*.deb
+          path: packages/*.deb
+          retention-days: 30
+          if-no-files-found: error
 
-  release:
-    name: Create GitHub Release (tag only)
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download packages
-        uses: actions/download-artifact@v4
-        with:
-          name: packages
-          path: ./packages
-
-      - name: Release
+      - name: Create GitHub Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ./packages/*.deb
+          files: packages/*.deb
           generate_release_notes: true
           draft: false
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
