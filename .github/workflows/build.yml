@@ -31,20 +31,21 @@ jobs:
           fetch-depth: 0
 
       - name: Print runner info
+        shell: bash -euxo pipefail {0}
         run: |
           uname -a
           sw_vers || true
           xcodebuild -version || true
           xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true
-          which git make clang xcrun ldid || true
+          which git make clang xcrun ldid dpkg-deb || true
           echo "HOME=$HOME"
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
 
       - name: Install Homebrew dependencies
+        shell: bash -euxo pipefail {0}
         run: |
           set +e
-          brew list -1
-          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -40
+          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -50
           set -e
           echo "/opt/homebrew/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
           echo "/opt/homebrew/opt/dpkg/bin" >> "$GITHUB_PATH"
@@ -56,29 +57,52 @@ jobs:
         with:
           path: |
             /Users/runner/theos
-          key: ${{ runner.os }}-roothide-theos-v2-${{ hashFiles('.github/workflows/build.yml') }}
+          key: ${{ runner.os }}-roothide-theos-v3-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
+            ${{ runner.os }}-roothide-theos-v3-
             ${{ runner.os }}-roothide-theos-v2-
+            ${{ runner.os }}-roothide-theos-
 
       - name: Install RootHide Theos + SDKs
         if: steps.cache-theos.outputs.cache-hit != 'true'
+        shell: bash -euxo pipefail {0}
         run: |
           set -e
           export THEOS="$HOME/theos"
-          echo "Installing RootHide Theos to $THEOS ..."
+          echo "Installing RootHide-aware Theos to $THEOS ..."
 
-          # 1) RootHide 的 Theos 分支（roothide-pure），完整支持 THEOS_PACKAGE_SCHEME=roothide
-          if [ ! -d "$THEOS" ]; then
-              git clone --recursive --depth 1 -b roothide-pure https://github.com/Roothide/Theos.git "$THEOS"
-          else
-              cd "$THEOS"
-              git fetch --depth 1 origin roothide-pure || true
-              git reset --hard origin/roothide-pure || true
-              git submodule update --init --recursive --depth 1 || true
+          if [ -d "$THEOS" ]; then
+              echo "Removing stale $THEOS to avoid unrelated histories ..."
+              rm -rf "$THEOS"
           fi
-          ls "$THEOS"
 
-          # 2) SDK：优先用 runner 自带 iphoneOS SDK 的软链接；否则回退下载 xybp888/iOS-SDKs
+          # 先拿官方 Theos（稳定、clone 稳定）
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+
+          # 叠加 Roothide 专有文件 (vendor/lib / include patches) —— 不替换整个 Theos 目录
+          TMP_ROOTHIDE="$HOME/.tmp-roothide"
+          rm -rf "$TMP_ROOTHIDE"
+          set +e
+          git clone --recursive https://github.com/Roothide/Theos.git "$TMP_ROOTHIDE"
+          set -e
+          if [ -d "$TMP_ROOTHIDE/vendor" ]; then
+              # 只拷 vendor 子目录；有冲突的文件以 roothide 为准覆盖
+              cp -Rf "$TMP_ROOTHIDE/vendor/." "$THEOS/vendor/" || true
+          fi
+          if [ -d "$TMP_ROOTHIDE/bin" ]; then
+              cp -Rf "$TMP_ROOTHIDE/bin/." "$THEOS/bin/" || true
+          fi
+          if [ -d "$TMP_ROOTHIDE/makefiles" ]; then
+              cp -Rf "$TMP_ROOTHIDE/makefiles/." "$THEOS/makefiles/" || true
+          fi
+          if [ -d "$TMP_ROOTHIDE/include" ]; then
+              cp -Rf "$TMP_ROOTHIDE/include/." "$THEOS/include/" || true
+          fi
+          rm -rf "$TMP_ROOTHIDE"
+          ls "$THEOS"
+          ls "$THEOS/vendor" 2>/dev/null | head -20
+
+          # SDK：优先用 runner 自带 Xcode iPhoneOS SDK 的软链接
           mkdir -p "$THEOS/sdks"
           set +e
           SYS_SDK="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)"
@@ -90,33 +114,27 @@ jobs:
           fi
           ls -la "$THEOS/sdks" || true
 
-          # 回退：如果没找到系统 SDK，就下载一个 (xybp888 包含多数版本)
+          # 回退下载 xybp888/iOS-SDKs（只有在还没有任何 SDK 时才下载，很大要慢 1-3 分钟）
           if [ ! "$(ls -A $THEOS/sdks 2>/dev/null)" ]; then
-              echo "Downloading iOS SDKs fallback..."
+              echo "Fallback: downloading iOS-SDKs ..."
               cd /tmp
               curl -fsSL -o sdks.tar.gz https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.tar.gz
               tar -xzf sdks.tar.gz -C "$THEOS/sdks" --strip-components=1 || true
               rm -f sdks.tar.gz
           fi
-          echo "Final SDKs dir:"
+          echo "Final SDKs:"
           find "$THEOS/sdks" -maxdepth 2 -type d -name "iPhoneOS*.sdk" || true
-          ls -la "$THEOS/sdks" | head -30
-
-          # 3) theos/vendor（Roothide 额外需要的头/tbd，官方 Theos 脚本自带）
-          if [ -x "$THEOS/bin/install-theos" ]; then
-              "$THEOS/bin/install-theos" --sdks 2>&1 | tail -30 || true
-          fi
 
       - name: Ensure THEOS env & tool versions
+        shell: bash -euxo pipefail {0}
         run: |
           export THEOS="$HOME/theos"
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
           echo "THEOS=$THEOS"
-          test -d "$THEOS" && echo "OK: $THEOS exists"
-          ls "$THEOS/bin" | head -20
+          test -d "$THEOS" && echo "OK: THEOS exists"
+          ls "$THEOS/bin" | head -30 || true
           echo "---"
           make --version | head -1
-          gnumake --version 2>/dev/null | head -1 || true
           dpkg-deb --version | head -1 || true
           clang --version | head -1
           xcrun --find clang || true
@@ -136,10 +154,8 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           ls -la
 
-          # make 实际执行前先打印变量（便于排查）
-          make -C . show 2>&1 | head -80 || echo "(no 'show' target; continuing)"
-
-          make clean 2>&1 | tail -30 || true
+          make clean 2>&1 | tail -20 || true
+          set -o pipefail
           make package FINALPACKAGE=1 VERBOSE=1 2>&1 | tee build.log
 
           echo "--- Build output listing ---"
