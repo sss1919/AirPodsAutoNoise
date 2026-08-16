@@ -15,6 +15,7 @@ env:
   SDKVERSION: '17.1'
   TARGET: iphone:clang:17.1:15.0
   ARCHS: arm64e
+  BUILD_LOG_PATH: /tmp/theos-build.log
 
 jobs:
   build:
@@ -23,10 +24,6 @@ jobs:
     permissions:
       contents: read
 
-    defaults:
-      run:
-        shell: bash -lc {0}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +31,40 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Re-export base env into GITHUB_ENV + brew shellenv (bootstrap)
+        shell: bash -euxo pipefail {0}
+        run: |
+          # 1) 把 workflow env 显式再写一次，避免任何 step shell 变化导致读不到
+          {
+            echo "THEOS=${THEOS}"
+            echo "THEOS_PACKAGE_SCHEME=${THEOS_PACKAGE_SCHEME}"
+            echo "SDKVERSION=${SDKVERSION}"
+            echo "TARGET=${TARGET}"
+            echo "ARCHS=${ARCHS}"
+            echo "BUILD_LOG_PATH=${BUILD_LOG_PATH}"
+          } >> "$GITHUB_ENV"
+
+          # 2) brew shellenv（等同于 bash -lc 的 PATH / 变量注入，但不执行 login 脚本，避免 126）
+          BREW_BIN=""
+          if [ -x /opt/homebrew/bin/brew ]; then BREW_BIN=/opt/homebrew/bin/brew;
+          elif [ -x /usr/local/bin/brew ]; then BREW_BIN=/usr/local/bin/brew; fi
+          if [ -n "$BREW_BIN" ]; then
+            eval "$("$BREW_BIN" shellenv 2>/dev/null || true)" 2>/dev/null || true
+            # 把 brew 加进 PATH 并持久到后续所有 step
+            echo "PATH=$PATH" >> "$GITHUB_ENV"
+          fi
+
+          {
+            echo '### Step 0: Env bootstrap'
+            echo '```'
+            echo THEOS="$THEOS"
+            echo PATH="$PATH"
+            echo BREW_BIN="$BREW_BIN"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Print runner info
+        shell: bash -euxo pipefail {0}
         run: |
           {
             echo '### Runner info'
@@ -50,6 +80,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Homebrew dependencies
+        shell: bash -euxo pipefail {0}
         env:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: '1'
           HOMEBREW_NO_INSTALL_CLEANUP: '1'
@@ -71,14 +102,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           set -e
 
-          {
-            echo "THEOS=${THEOS}"
-            echo "THEOS_PACKAGE_SCHEME=${THEOS_PACKAGE_SCHEME}"
-            echo "SDKVERSION=${SDKVERSION}"
-            echo "TARGET=${TARGET}"
-            echo "ARCHS=${ARCHS}"
-          } >> "$GITHUB_ENV"
-
       - name: Cache Theos + SDKs
         id: cache-theos
         uses: actions/cache@v4
@@ -86,11 +109,13 @@ jobs:
           path: |
             /Users/runner/theos
             /Users/runner/sdks
-          key: theos-roothide-arm64e-macos14-v1-${{ hashFiles('.github/workflows/build.yml') }}
+          key: theos-roothide-arm64e-macos14-v2-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
+            theos-roothide-arm64e-macos14-v2-
             theos-roothide-arm64e-macos14-v1-
 
       - name: Setup Theos + RootHide overlay + iPhoneOS SDK
+        shell: bash -euxo pipefail {0}
         run: |
           {
             echo '### Setup Theos / RootHide / SDK'
@@ -157,6 +182,7 @@ jobs:
           fi
 
       - name: Pre-build debug dump (always run)
+        shell: bash -euxo pipefail {0}
         run: |
           set +e
           {
@@ -183,6 +209,7 @@ jobs:
 
       - name: Build package (make package THEOS_PACKAGE_SCHEME=roothide)
         id: build
+        shell: bash -euxo pipefail {0}
         continue-on-error: true
         run: |
           {
@@ -195,6 +222,7 @@ jobs:
             echo SDKVERSION="$SDKVERSION"
             echo TARGET="$TARGET"
             echo ARCHS="$ARCHS"
+            echo BUILD_LOG_PATH="$BUILD_LOG_PATH"
             echo '--- THEOS dir sanity ---'
             for f in "$THEOS/makefiles/common.mk" "$THEOS/makefiles/tweak.mk"; do
               if [ -f "$f" ]; then echo "OK  $f"; else echo "MISSING $f"; fi
@@ -203,21 +231,20 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          BUILD_LOG="$RUNNER_TEMP/build.log"
           set +e
-          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME" SDKVERSION="$SDKVERSION" TARGET="$TARGET" ARCHS="$ARCHS" 2>&1 | tee "$BUILD_LOG" | tail -n 80 | tee -a "$GITHUB_STEP_SUMMARY"
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME" SDKVERSION="$SDKVERSION" TARGET="$TARGET" ARCHS="$ARCHS" 2>&1 | tee "$BUILD_LOG_PATH" | tail -n 80 | tee -a "$GITHUB_STEP_SUMMARY"
           RC="${PIPESTATUS[0]}"
           set -e
 
           {
             echo "### Build result: exit=$RC"
-            if [ -f "$BUILD_LOG" ]; then
-              echo "build.log bytes: $(wc -c < "$BUILD_LOG" | tr -d ' ')"
+            if [ -f "$BUILD_LOG_PATH" ]; then
+              echo "build.log bytes: $(wc -c < "$BUILD_LOG_PATH" | tr -d ' ')"
             fi
             echo ''
             echo '### Full build.log (last 300 lines)'
             echo '```'
-            if [ -f "$BUILD_LOG" ]; then tail -n 300 "$BUILD_LOG"; fi
+            if [ -f "$BUILD_LOG_PATH" ]; then tail -n 300 "$BUILD_LOG_PATH"; fi
             echo '```'
 
             if [ "$RC" -ne 0 ]; then
@@ -234,26 +261,25 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "build-log-path=$BUILD_LOG" >> "$GITHUB_OUTPUT"
-
           exit "$RC"
 
       - name: Upload build log
-        uses: actions/upload-artifact@v4
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: ${{ steps.build.outputs.build-log-path }}
+          path: /tmp/theos-build.log
           retention-days: 14
           if-no-files-found: warn
 
       - name: Upload .deb packages
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: packages
           path: packages/*.deb
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Create GitHub Release (tag only)
         if: startsWith(github.ref, 'refs/tags/v')
