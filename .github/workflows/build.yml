@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  THEOS: /opt/theos
+  THEOS: /Users/runner/theos
   THEOS_PACKAGE_SCHEME: roothide
   SDKVERSION: '17.1'
   TARGET: iphone:clang:17.1:15.0
@@ -20,6 +20,8 @@ jobs:
   build:
     name: Build Tweak (Rootless arm64e)
     runs-on: macos-14
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -28,73 +30,120 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Print runner info
+        run: |
+          uname -a
+          sw_vers || true
+          xcodebuild -version || true
+          xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true
+          which git make clang xcrun ldid || true
+          echo "HOME=$HOME"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+
       - name: Install Homebrew dependencies
         run: |
-          brew install ldid xz gnu-tar pkg-config make
-          echo "/usr/local/opt/make/libexec/gnubin" >> $GITHUB_PATH 2>/dev/null || true
-          echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH 2>/dev/null || true
+          set +e
+          brew list -1
+          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -40
+          set -e
+          echo "/opt/homebrew/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/opt/dpkg/bin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
 
-      - name: Cache Xcode / SDKs
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/Library/Developer/Xcode
-            ~/Library/Developer/CoreSimulator
-          key: ${{ runner.os }}-xcode-${{ hashFiles('**/*.xcodeproj/**') }}
-          restore-keys: |
-            ${{ runner.os }}-xcode-
-
-      - name: Cache Theos
+      - name: Cache Theos + SDKs
         id: cache-theos
         uses: actions/cache@v4
         with:
           path: |
-            /opt/theos
-            ~/theos
-          key: ${{ runner.os }}-theos-roothide-2024-1
+            /Users/runner/theos
+          key: ${{ runner.os }}-roothide-theos-v2-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-roothide-theos-v2-
 
-      - name: Install Theos + RootHide toolchain
+      - name: Install RootHide Theos + SDKs
         if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
           set -e
+          export THEOS="$HOME/theos"
+          echo "Installing RootHide Theos to $THEOS ..."
 
-          # 1) 官方 Theos (稳定版)
-          git clone --recursive https://github.com/theos/theos.git /opt/theos || true
-          cd /opt/theos
-          git pull --ff-only || true
-          git submodule update --init --recursive || true
+          # 1) RootHide 的 Theos 分支（roothide-pure），完整支持 THEOS_PACKAGE_SCHEME=roothide
+          if [ ! -d "$THEOS" ]; then
+              git clone --recursive --depth 1 -b roothide-pure https://github.com/Roothide/Theos.git "$THEOS"
+          else
+              cd "$THEOS"
+              git fetch --depth 1 origin roothide-pure || true
+              git reset --hard origin/roothide-pure || true
+              git submodule update --init --recursive --depth 1 || true
+          fi
+          ls "$THEOS"
 
-          # 2) 获取 iPhoneOS SDK (17.x)
-          mkdir -p /opt/theos/sdks
-          cd /opt/theos/sdks
-          SDK_REPO="https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.tar.gz"
-          curl -L "$SDK_REPO" -o sdks.tar.gz 2>&1 | tail -3
-          tar -xzf sdks.tar.gz --strip-components=1 -C /opt/theos/sdks || true
-          rm -f sdks.tar.gz
-          ls -la /opt/theos/sdks | head -20
+          # 2) SDK：优先用 runner 自带 iphoneOS SDK 的软链接；否则回退下载 xybp888/iOS-SDKs
+          mkdir -p "$THEOS/sdks"
+          set +e
+          SYS_SDK="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)"
+          set -e
+          if [ -n "$SYS_SDK" ] && [ -d "$SYS_SDK" ]; then
+              SDK_NAME="$(basename "$SYS_SDK")"
+              [ -e "$THEOS/sdks/$SDK_NAME" ] || ln -s "$SYS_SDK" "$THEOS/sdks/$SDK_NAME"
+              echo "Using bundled SDK: $SDK_NAME -> $SYS_SDK"
+          fi
+          ls -la "$THEOS/sdks" || true
 
-      - name: Ensure THEOS env
+          # 回退：如果没找到系统 SDK，就下载一个 (xybp888 包含多数版本)
+          if [ ! "$(ls -A $THEOS/sdks 2>/dev/null)" ]; then
+              echo "Downloading iOS SDKs fallback..."
+              cd /tmp
+              curl -fsSL -o sdks.tar.gz https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.tar.gz
+              tar -xzf sdks.tar.gz -C "$THEOS/sdks" --strip-components=1 || true
+              rm -f sdks.tar.gz
+          fi
+          echo "Final SDKs dir:"
+          find "$THEOS/sdks" -maxdepth 2 -type d -name "iPhoneOS*.sdk" || true
+          ls -la "$THEOS/sdks" | head -30
+
+          # 3) theos/vendor（Roothide 额外需要的头/tbd，官方 Theos 脚本自带）
+          if [ -x "$THEOS/bin/install-theos" ]; then
+              "$THEOS/bin/install-theos" --sdks 2>&1 | tail -30 || true
+          fi
+
+      - name: Ensure THEOS env & tool versions
         run: |
-          ls /opt/theos || true
-          test -d /opt/theos
-          ls /opt/theos/sdks 2>/dev/null || echo "sdks dir listing:" && find /opt/theos/sdks -maxdepth 1 -type d | head
+          export THEOS="$HOME/theos"
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
+          echo "THEOS=$THEOS"
+          test -d "$THEOS" && echo "OK: $THEOS exists"
+          ls "$THEOS/bin" | head -20
+          echo "---"
+          make --version | head -1
+          gnumake --version 2>/dev/null | head -1 || true
+          dpkg-deb --version | head -1 || true
+          clang --version | head -1
+          xcrun --find clang || true
+          ldid 2>&1 | head -1 || true
 
-      - name: Build package (make package FINALPACKAGE=1)
+      - name: Build package
         id: build
+        shell: bash -euxo pipefail {0}
         run: |
-          export PATH="/opt/theos/bin:$PATH"
-          export THEOS=/opt/theos
+          export THEOS="$HOME/theos"
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
           export THEOS_PACKAGE_SCHEME=roothide
           export ARCHS=arm64e
           export SDKVERSION=17.1
           export TARGET=iphone:clang:17.1:15.0
 
-          set -o pipefail
-          make clean || true
-          make package FINALPACKAGE=1 2>&1 | tee build.log
+          cd "$GITHUB_WORKSPACE"
+          ls -la
+
+          # make 实际执行前先打印变量（便于排查）
+          make -C . show 2>&1 | head -80 || echo "(no 'show' target; continuing)"
+
+          make clean 2>&1 | tail -30 || true
+          make package FINALPACKAGE=1 VERBOSE=1 2>&1 | tee build.log
 
           echo "--- Build output listing ---"
-          find . -maxdepth 2 \( -name "*.deb" -o -name "*.zip" \) -ls
+          find "$GITHUB_WORKSPACE" -maxdepth 3 \( -name "*.deb" -o -name "*.zip" -o -name "*.dylib" \) -ls || true
 
       - name: Upload build log on failure
         if: failure()
@@ -102,15 +151,18 @@ jobs:
         with:
           name: build-log
           path: build.log
+          if-no-files-found: ignore
 
       - name: Upload .deb artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: packages
+          if-no-files-found: ignore
           path: |
             ./*.deb
             ./*/*.deb
+            ./*/*/*.deb
 
   release:
     name: Create GitHub Release (tag only)
