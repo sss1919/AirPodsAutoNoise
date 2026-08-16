@@ -22,7 +22,7 @@ jobs:
     name: Build Tweak (Rootless arm64e)
     runs-on: macos-14
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout
@@ -34,7 +34,6 @@ jobs:
       - name: Re-export base env into GITHUB_ENV + brew shellenv (bootstrap)
         shell: bash -euxo pipefail {0}
         run: |
-          # 1) 把 workflow env 显式再写一次，避免任何 step shell 变化导致读不到
           {
             echo "THEOS=${THEOS}"
             echo "THEOS_PACKAGE_SCHEME=${THEOS_PACKAGE_SCHEME}"
@@ -44,13 +43,11 @@ jobs:
             echo "BUILD_LOG_PATH=${BUILD_LOG_PATH}"
           } >> "$GITHUB_ENV"
 
-          # 2) brew shellenv（等同于 bash -lc 的 PATH / 变量注入，但不执行 login 脚本，避免 126）
           BREW_BIN=""
           if [ -x /opt/homebrew/bin/brew ]; then BREW_BIN=/opt/homebrew/bin/brew;
           elif [ -x /usr/local/bin/brew ]; then BREW_BIN=/usr/local/bin/brew; fi
           if [ -n "$BREW_BIN" ]; then
             eval "$("$BREW_BIN" shellenv 2>/dev/null || true)" 2>/dev/null || true
-            # 把 brew 加进 PATH 并持久到后续所有 step
             echo "PATH=$PATH" >> "$GITHUB_ENV"
           fi
 
@@ -95,7 +92,7 @@ jobs:
             echo '--- untap aws/tap ---'
             brew untap aws/tap 2>&1
             echo '--- brew install ---'
-            brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -n 120
+            brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -n 150
             echo '--- versions ---'
             command -v ldid dpkg-deb gmake make || true
             echo '```'
@@ -128,11 +125,11 @@ jobs:
             set -e
             echo "[cache-miss] bootstrapping THEOS..." | tee -a "$GITHUB_STEP_SUMMARY"
 
-            git clone --recursive https://github.com/theos/theos.git "$THEOS" 2>&1 | tail -n 40 | tee -a "$GITHUB_STEP_SUMMARY"
+            git clone --recursive https://github.com/theos/theos.git "$THEOS" 2>&1 | tail -n 60 | tee -a "$GITHUB_STEP_SUMMARY"
 
             for d in vendor bin makefiles include; do
               rm -rf "$THEOS/$d" 2>/dev/null || true
-              git clone --depth 1 --single-branch https://github.com/Roothide/Theos.git "$THEOS/.roothide-src-$d" 2>&1 | tail -n 5 | tee -a "$GITHUB_STEP_SUMMARY" || true
+              git clone --depth 1 --single-branch https://github.com/Roothide/Theos.git "$THEOS/.roothide-src-$d" 2>&1 | tail -n 10 | tee -a "$GITHUB_STEP_SUMMARY" || true
               if [ -d "$THEOS/.roothide-src-$d/$d" ]; then
                 cp -R "$THEOS/.roothide-src-$d/$d" "$THEOS/$d"
               fi
@@ -146,17 +143,23 @@ jobs:
           set +e
           {
             echo '--- THEOS layout (top) ---'
-            ls -la "$THEOS" 2>&1 | head -n 60
+            ls -la "$THEOS" 2>&1 | head -n 80
             echo '--- THEOS makefiles ---'
-            ls -la "$THEOS/makefiles" 2>&1 | head -n 80
+            ls -la "$THEOS/makefiles" 2>&1 | head -n 120
             echo '--- THEOS bin ---'
-            ls -la "$THEOS/bin" 2>&1 | head -n 80
+            ls -la "$THEOS/bin" 2>&1 | head -n 120
             echo '--- THEOS vendor ---'
-            ls -la "$THEOS/vendor" 2>&1 | head -n 40
+            ls -la "$THEOS/vendor" 2>&1 | head -n 60
+            echo '--- THEOS sdks (THEOS/sdks) ---'
+            ls -la "$THEOS/sdks" 2>&1 | head -n 60
             echo '--- common.mk / tweak.mk present? ---'
-            for f in "$THEOS/makefiles/common.mk" "$THEOS/makefiles/tweak.mk" "$THEOS/bin/dnicetype"; do
+            for f in "$THEOS/makefiles/common.mk" "$THEOS/makefiles/tweak.mk" "$THEOS/bin/dnicetype" "$THEOS/bin/logos.pl"; do
               if [ -e "$f" ]; then echo "OK  $f"; else echo "MISS $f"; fi
             done
+            echo '--- dpkg-deb version ---'
+            dpkg-deb --version 2>&1 | head -n 3
+            echo '--- ldid version ---'
+            ldid 2>&1 | head -n 5 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           set -e
@@ -168,16 +171,20 @@ jobs:
             echo '```'
             echo "SDK_FROM_XCRUN=$SDK_FROM_XCRUN"
             ls -la "$HOME/sdks" 2>&1 | head -n 40
+            echo '--- xcode-select -p ---'
+            xcode-select -p 2>&1 || true
+            echo '--- xcodebuild sdks ---'
+            xcodebuild -showsdks 2>&1 | head -n 30 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ -z "$SDK_FROM_XCRUN" ]; then
             set -e
             if ! command -v xcodes >/dev/null 2>&1; then
-              brew install --formula xcodesorg/made/xcodes 2>&1 | tail -n 30 | tee -a "$GITHUB_STEP_SUMMARY" || true
+              brew install --formula xcodesorg/made/xcodes 2>&1 | tail -n 40 | tee -a "$GITHUB_STEP_SUMMARY" || true
             fi
             if command -v xcodes >/dev/null 2>&1; then
-              xcodes install 15.2 --select 2>&1 | tail -n 40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+              xcodes install 15.2 --select 2>&1 | tail -n 50 | tee -a "$GITHUB_STEP_SUMMARY" || true
             fi
           fi
 
@@ -197,9 +204,19 @@ jobs:
             echo '--- which theos bins ---'
             which theos theos-build logify 2>&1
             echo '--- ls THEOS/makefiles/*.mk ---'
-            ls "$THEOS/makefiles"/*.mk 2>&1 | head -n 50
-            echo '--- ls THEOS/sdks ---'
-            ls -la "$THEOS/sdks" 2>&1 | head -n 30
+            ls "$THEOS/makefiles"/*.mk 2>&1 | head -n 80
+            echo '--- ls $PWD ---'
+            ls -la "$GITHUB_WORKSPACE" 2>&1
+            echo '--- ls $PWD/.. ---'
+            ls -la "$GITHUB_WORKSPACE/.." 2>&1 | head -n 40
+            echo '--- control ---'
+            cat control 2>&1
+            echo '--- Makefile ---'
+            cat Makefile 2>&1
+            echo '--- Tweak.xm head ---'
+            head -n 40 Tweak.xm 2>&1
+            echo '--- Filter.plist ---'
+            cat Filter.plist 2>&1
             echo '--- xcrun sdk iphoneos ---'
             xcrun --sdk iphoneos --show-sdk-path 2>&1
             xcrun --sdk iphoneos --show-sdk-version 2>&1
@@ -210,58 +227,65 @@ jobs:
       - name: Build package (make package THEOS_PACKAGE_SCHEME=roothide)
         id: build
         shell: bash -euxo pipefail {0}
-        continue-on-error: true
         run: |
           {
             echo '### Build Environment'
             echo '```'
-            set | grep -E '^(THEOS|SDK|TARGET|ARCHS|PATH|HOME|GITHUB)' 2>&1 | head -n 40 || true
-            echo '--- env from workflow ---'
-            echo THEOS="$THEOS"
-            echo THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME"
-            echo SDKVERSION="$SDKVERSION"
-            echo TARGET="$TARGET"
-            echo ARCHS="$ARCHS"
-            echo BUILD_LOG_PATH="$BUILD_LOG_PATH"
+            set | grep -E '^(THEOS|SDK|TARGET|ARCHS|PATH|HOME|GITHUB|THEOS_PACKAGE_SCHEME)' 2>&1 | head -n 60 || true
             echo '--- THEOS dir sanity ---'
             for f in "$THEOS/makefiles/common.mk" "$THEOS/makefiles/tweak.mk"; do
               if [ -f "$f" ]; then echo "OK  $f"; else echo "MISSING $f"; fi
             done
-            ls -la "$THEOS/makefiles" 2>&1 | head -n 50 || true
+            ls -la "$THEOS/makefiles" 2>&1 | head -n 80 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
           set +e
-          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME" SDKVERSION="$SDKVERSION" TARGET="$TARGET" ARCHS="$ARCHS" 2>&1 | tee "$BUILD_LOG_PATH" | tail -n 80 | tee -a "$GITHUB_STEP_SUMMARY"
-          RC="${PIPESTATUS[0]}"
-          set -e
+          {
+            echo '### make clean package (full stdout+stderr, un-truncated in build.log)'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
           {
-            echo "### Build result: exit=$RC"
-            if [ -f "$BUILD_LOG_PATH" ]; then
-              echo "build.log bytes: $(wc -c < "$BUILD_LOG_PATH" | tr -d ' ')"
-            fi
+            make clean package FINALPACKAGE=1 \
+              THEOS_PACKAGE_SCHEME="$THEOS_PACKAGE_SCHEME" \
+              SDKVERSION="$SDKVERSION" \
+              TARGET="$TARGET" \
+              ARCHS="$ARCHS" 2>&1
+            echo "[make exited RC=$?]"
+          } | tee "$BUILD_LOG_PATH"
+
+          tail -n 120 "$BUILD_LOG_PATH" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo '```'
             echo ''
-            echo '### Full build.log (last 300 lines)'
+            echo '### Post-build artifact listing'
             echo '```'
-            if [ -f "$BUILD_LOG_PATH" ]; then tail -n 300 "$BUILD_LOG_PATH"; fi
+            echo '--- repo root ---'
+            ls -la "$GITHUB_WORKSPACE" 2>&1
+            echo '--- packages/ (first 3 levels) ---'
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f \( -name '*.deb' -o -name '*.tar*' -o -name '*.zip' \) -print 2>&1
+            echo '--- $PWD/packages (if exists) ---'
+            ls -la packages 2>&1 || echo 'packages directory NOT PRESENT'
+            echo '--- Theos _stage / obj dirs ---'
+            find . -maxdepth 4 \( -type d -name _ -o -type d -name obj -o -type d -name stage \) -print 2>&1 | head -n 40
+            echo '--- build.log tail last 40 lines ---'
+            tail -n 40 "$BUILD_LOG_PATH" 2>&1
+            echo '--- build.log grep error/warning/ldid/dpkg ---'
+            grep -n -i -E 'error|warning|dpkg|ldid|control|package' "$BUILD_LOG_PATH" 2>&1 | head -n 80 || true
             echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
-            if [ "$RC" -ne 0 ]; then
-              echo ''
-              echo '### Environment & THEOS layout (on failure only)'
-              echo '```'
-              set | grep -i -E 'theos|sdk|target|arch|path|root' | head -n 60
-              echo '---'
-              ls -la "$THEOS" 2>&1 | head -n 50
-              ls -la "$THEOS/makefiles" 2>&1 | head -n 80
-              echo '---'
-              find "$THEOS" -maxdepth 3 -type d 2>&1 | head -n 80
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          exit "$RC"
+          # 关键：如果 packages/*.deb 不存在，直接失败退出；不再让 workflow 假绿
+          shopt -s nullglob
+          DEBS=(packages/*.deb)
+          if [ "${#DEBS[@]}" -eq 0 ]; then
+            echo ''
+            echo '### FATAL: NO .deb produced — failing workflow explicitly' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 3
+          fi
+          exit 0
 
       - name: Upload build log
         if: always()
@@ -273,15 +297,31 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload .deb packages
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: packages
           path: packages/*.deb
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
-      - name: Create GitHub Release (tag only)
+      - name: Publish deb to GitHub Releases (main push latest, or tag v*)
+        id: release
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: continuous
+          name: Latest build (continuous)
+          files: packages/*.deb
+          generate_release_notes: true
+          draft: false
+          prerelease: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release final tag (vX.Y.Z only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
@@ -289,5 +329,6 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
