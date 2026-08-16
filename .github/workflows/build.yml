@@ -33,23 +33,33 @@ jobs:
       - name: Print runner info
         shell: bash -euxo pipefail {0}
         run: |
-          uname -a
-          sw_vers || true
-          xcodebuild -version || true
-          xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true
-          which git make clang xcrun ldid dpkg-deb || true
-          echo "HOME=$HOME"
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          {
+            echo '### Runner info'
+            echo '```'
+            uname -a
+            sw_vers || true
+            xcodebuild -version || true
+            xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true
+            which git make clang xcrun ldid dpkg-deb || true
+            echo HOME="$HOME"
+            echo GITHUB_WORKSPACE="$GITHUB_WORKSPACE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Homebrew dependencies
         shell: bash -euxo pipefail {0}
         run: |
+          {
+            echo '### brew install'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           set +e
-          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -50
+          brew install --formula ldid xz gnu-tar pkg-config make dpkg 2>&1 | tail -80 | tee -a "$GITHUB_STEP_SUMMARY"
           set -e
           echo "/opt/homebrew/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
           echo "/opt/homebrew/opt/dpkg/bin" >> "$GITHUB_PATH"
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cache Theos + SDKs
         id: cache-theos
@@ -57,8 +67,9 @@ jobs:
         with:
           path: |
             /Users/runner/theos
-          key: ${{ runner.os }}-roothide-theos-v3-${{ hashFiles('.github/workflows/build.yml') }}
+          key: ${{ runner.os }}-roothide-theos-v4-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
+            ${{ runner.os }}-roothide-theos-v4-
             ${{ runner.os }}-roothide-theos-v3-
             ${{ runner.os }}-roothide-theos-v2-
             ${{ runner.os }}-roothide-theos-
@@ -76,69 +87,65 @@ jobs:
               rm -rf "$THEOS"
           fi
 
-          # 先拿官方 Theos（稳定、clone 稳定）
-          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          echo '### Theos install log' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          (set -x
+            # 1) 官方 Theos（稳定）
+            git clone --recursive https://github.com/theos/theos.git "$THEOS" 2>&1 | tail -50 | tee -a "$GITHUB_STEP_SUMMARY"
 
-          # 叠加 Roothide 专有文件 (vendor/lib / include patches) —— 不替换整个 Theos 目录
-          TMP_ROOTHIDE="$HOME/.tmp-roothide"
-          rm -rf "$TMP_ROOTHIDE"
-          set +e
-          git clone --recursive https://github.com/Roothide/Theos.git "$TMP_ROOTHIDE"
-          set -e
-          if [ -d "$TMP_ROOTHIDE/vendor" ]; then
-              # 只拷 vendor 子目录；有冲突的文件以 roothide 为准覆盖
-              cp -Rf "$TMP_ROOTHIDE/vendor/." "$THEOS/vendor/" || true
-          fi
-          if [ -d "$TMP_ROOTHIDE/bin" ]; then
-              cp -Rf "$TMP_ROOTHIDE/bin/." "$THEOS/bin/" || true
-          fi
-          if [ -d "$TMP_ROOTHIDE/makefiles" ]; then
-              cp -Rf "$TMP_ROOTHIDE/makefiles/." "$THEOS/makefiles/" || true
-          fi
-          if [ -d "$TMP_ROOTHIDE/include" ]; then
-              cp -Rf "$TMP_ROOTHIDE/include/." "$THEOS/include/" || true
-          fi
-          rm -rf "$TMP_ROOTHIDE"
-          ls "$THEOS"
-          ls "$THEOS/vendor" 2>/dev/null | head -20
+            # 2) 叠加 Roothide 的 vendor/bin/makefiles/include
+            TMP_ROOTHIDE="$HOME/.tmp-roothide"
+            rm -rf "$TMP_ROOTHIDE"
+            git clone --recursive https://github.com/Roothide/Theos.git "$TMP_ROOTHIDE" 2>&1 | tail -20 | tee -a "$GITHUB_STEP_SUMMARY"
+            for d in vendor bin makefiles include; do
+                [ -d "$TMP_ROOTHIDE/$d" ] || continue
+                cp -Rf "$TMP_ROOTHIDE/$d/." "$THEOS/$d/" || true
+            done
+            rm -rf "$TMP_ROOTHIDE"
 
-          # SDK：优先用 runner 自带 Xcode iPhoneOS SDK 的软链接
-          mkdir -p "$THEOS/sdks"
-          set +e
-          SYS_SDK="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)"
-          set -e
-          if [ -n "$SYS_SDK" ] && [ -d "$SYS_SDK" ]; then
-              SDK_NAME="$(basename "$SYS_SDK")"
-              [ -e "$THEOS/sdks/$SDK_NAME" ] || ln -s "$SYS_SDK" "$THEOS/sdks/$SDK_NAME"
-              echo "Using bundled SDK: $SDK_NAME -> $SYS_SDK"
-          fi
-          ls -la "$THEOS/sdks" || true
+            # 3) SDKs
+            mkdir -p "$THEOS/sdks"
+            set +e
+            SYS_SDK="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)"
+            set -e
+            if [ -n "$SYS_SDK" ] && [ -d "$SYS_SDK" ]; then
+                SDK_NAME="$(basename "$SYS_SDK")"
+                [ -e "$THEOS/sdks/$SDK_NAME" ] || ln -s "$SYS_SDK" "$THEOS/sdks/$SDK_NAME"
+                echo "Using bundled SDK: $SDK_NAME -> $SYS_SDK" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
 
-          # 回退下载 xybp888/iOS-SDKs（只有在还没有任何 SDK 时才下载，很大要慢 1-3 分钟）
-          if [ ! "$(ls -A $THEOS/sdks 2>/dev/null)" ]; then
-              echo "Fallback: downloading iOS-SDKs ..."
-              cd /tmp
-              curl -fsSL -o sdks.tar.gz https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.tar.gz
-              tar -xzf sdks.tar.gz -C "$THEOS/sdks" --strip-components=1 || true
-              rm -f sdks.tar.gz
-          fi
-          echo "Final SDKs:"
-          find "$THEOS/sdks" -maxdepth 2 -type d -name "iPhoneOS*.sdk" || true
+            if [ ! "$(ls -A $THEOS/sdks 2>/dev/null)" ]; then
+                echo "Fallback: downloading iOS-SDKs ..." | tee -a "$GITHUB_STEP_SUMMARY"
+                cd /tmp
+                curl -fsSL -o sdks.tar.gz https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.tar.gz 2>&1 | tail -5 | tee -a "$GITHUB_STEP_SUMMARY"
+                tar -xzf sdks.tar.gz -C "$THEOS/sdks" --strip-components=1 2>&1 | tail -5 | tee -a "$GITHUB_STEP_SUMMARY" || true
+                rm -f sdks.tar.gz
+            fi
+
+            echo "Final SDKs dir:" | tee -a "$GITHUB_STEP_SUMMARY"
+            ls -la "$THEOS/sdks" | head -30 | tee -a "$GITHUB_STEP_SUMMARY"
+          )
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ensure THEOS env & tool versions
         shell: bash -euxo pipefail {0}
         run: |
           export THEOS="$HOME/theos"
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/dpkg/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
-          echo "THEOS=$THEOS"
-          test -d "$THEOS" && echo "OK: THEOS exists"
-          ls "$THEOS/bin" | head -30 || true
-          echo "---"
-          make --version | head -1
-          dpkg-deb --version | head -1 || true
-          clang --version | head -1
-          xcrun --find clang || true
-          ldid 2>&1 | head -1 || true
+          {
+            echo '### Environment'
+            echo '```'
+            echo THEOS="$THEOS"
+            test -d "$THEOS" && echo OK: THEOS exists
+            ls "$THEOS/bin" | head -30 || true
+            echo '---'
+            make --version | head -1
+            dpkg-deb --version | head -1 || true
+            clang --version | head -1
+            xcrun --find clang || true
+            ldid 2>&1 | head -1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build package
         id: build
@@ -154,12 +161,38 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           ls -la
 
-          make clean 2>&1 | tail -20 || true
-          set -o pipefail
-          make package FINALPACKAGE=1 VERBOSE=1 2>&1 | tee build.log
+          {
+            echo '### Build log'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "--- Build output listing ---"
-          find "$GITHUB_WORKSPACE" -maxdepth 3 \( -name "*.deb" -o -name "*.zip" -o -name "*.dylib" \) -ls || true
+          make clean 2>&1 | tail -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          set +e
+          set -o pipefail
+          make package FINALPACKAGE=1 VERBOSE=1 2>&1 | tee build.log | tail -n 300 | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo '### Build output'
+            echo '```'
+            find "$GITHUB_WORKSPACE" -maxdepth 3 \( -name "*.deb" -o -name "*.zip" -o -name "*.dylib" \) -ls 2>&1 || true
+            echo '```'
+            if [ "$rc" -ne 0 ]; then
+                echo ''
+                echo '### Full build.log (first 250 lines)'
+                echo '```'
+                head -n 250 build.log 2>/dev/null || true
+                echo '```'
+                echo ''
+                echo '### Full build.log (last 250 lines)'
+                echo '```'
+                tail -n 250 build.log 2>/dev/null || true
+                echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$rc"
 
       - name: Upload build log on failure
         if: failure()
