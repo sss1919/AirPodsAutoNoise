@@ -22,7 +22,7 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - name: 0. Early Summary header
+      - name: "0. Early Summary header"
         run: |
           {
             echo "# Run started"
@@ -33,13 +33,13 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 1. Checkout
+      - name: "1. Checkout"
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: 2. Install Homebrew dependencies (tap trust safe)
+      - name: "2. Install Homebrew dependencies (tap trust safe)"
         run: |
           export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
           brew untap aws/tap 2>/dev/null || true
@@ -61,7 +61,7 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 3. Cache Theos
+      - name: "3. Cache Theos"
         id: cache-theos
         uses: actions/cache@v4
         with:
@@ -70,7 +70,7 @@ jobs:
             ~/theos
           key: ${{ runner.os }}-theos-roothide-v4
 
-      - name: 4. Install Theos + SDK 17.1
+      - name: "4. Install Theos + SDK 17.1"
         if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
           set -e
@@ -91,7 +91,7 @@ jobs:
             fi
           fi
 
-      - name: 5. Validate Theos critical files
+      - name: "5. Validate Theos critical files"
         run: |
           {
             echo "## Step 5. Theos validation"
@@ -115,7 +115,7 @@ jobs:
           test -f /opt/theos/makefiles/aggregate.mk
           ls /opt/theos/sdks/iPhoneOS*.sdk/SDKSettings.json 2>/dev/null | head -1
 
-      - name: 6. Build package (make package FINALPACKAGE=1)
+      - name: "6. Build package (make package FINALPACKAGE=1)"
         id: build
         continue-on-error: true
         run: |
@@ -133,7 +133,7 @@ jobs:
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           exit 0
 
-      - name: 7. Post-build listing + Summary emit
+      - name: "7. Post-build listing + Summary emit"
         id: check_deb
         run: |
           {
@@ -156,7 +156,7 @@ jobs:
             echo "deb_exists=true" >> "$GITHUB_OUTPUT"
             echo "deb_path=$DEB"   >> "$GITHUB_OUTPUT"
             {
-              echo "### 🟢 .deb produced"
+              echo "### Green light - .deb produced"
               echo "- path: \`$DEB\`"
               echo "- size: $(wc -c < "$DEB" | tr -d ' ') bytes"
               echo
@@ -165,23 +165,23 @@ jobs:
             echo "deb_exists=false" >> "$GITHUB_OUTPUT"
             echo "deb_path="         >> "$GITHUB_OUTPUT"
             {
-              echo "### 🔴 NO .deb produced"
+              echo "### Red light - NO .deb produced"
               echo
             } | tee -a "$GITHUB_STEP_SUMMARY" >/dev/null
           fi
           exit 0
 
-      - name: 8. Emit build.log into Summary (always)
+      - name: "8. Emit build.log into Summary (always)"
         if: always()
         run: |
           {
-            echo "## Step 8. build.log — full length"
+            echo "## Step 8. build.log - full length"
             if [ -s build.log ]; then
-              echo "\`\`\`"
+              echo "--- START build.log ---"
               cat build.log
-              echo "\`\`\`"
+              echo "--- END build.log ---"
             else
-              echo "_build.log missing or empty_"
+              echo "(build.log missing or empty)"
             fi
             echo
           } | tee -a "$GITHUB_STEP_SUMMARY" >/dev/null
@@ -189,25 +189,22 @@ jobs:
           cp -f build.log build-log/build.log 2>/dev/null || true
           ls -la build-log/
 
-      - name: 9. Upload build.log artifact (always)
+      - name: "9. Upload build.log artifact"
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build-log/
 
-      - name: 10. Upload .deb artifact (always)
+      - name: "10. Upload .deb artifact"
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: packages
-          path: |
-            ./*.deb
-            ./*/*.deb
-            ./*/*/*.deb
+          path: "**/*.deb"
           if-no-files-found: ignore
 
-      - name: 11. Final: fail workflow explicitly if no .deb
+      - name: "11. Fail workflow if no .deb"
         if: steps.check_deb.outputs.deb_exists != 'true'
         run: |
           echo "No .deb artifact produced (make.rc=${{ steps.build.outputs.rc }}). Marking workflow FAILED." >&2
